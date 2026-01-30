@@ -1,0 +1,9 @@
+# OpenClaw Installer
+node_modules/
+.DS_Store
+*.log
+.env
+*.bak
+*.tmp
+.vscode/
+.idea/
