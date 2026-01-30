@@ -122,6 +122,75 @@ confirm() {
     esac
 }
 
+# 安全写入环境变量（处理特殊字符）
+escape_env_value() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '%s' "$value"
+}
+
+append_env_export() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    printf 'export %s="%s"\n' "$key" "$(escape_env_value "$value")" >> "$file"
+}
+
+add_path_to_shell() {
+    local path_entry="$1"
+    local shell_rc=""
+
+    if [ -f "$HOME/.zshrc" ]; then
+        shell_rc="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        shell_rc="$HOME/.bashrc"
+    elif [ -f "$HOME/.bash_profile" ]; then
+        shell_rc="$HOME/.bash_profile"
+    fi
+
+    if [ -n "$shell_rc" ]; then
+        if ! grep -q "$path_entry" "$shell_rc" 2>/dev/null; then
+            echo "" >> "$shell_rc"
+            echo "# OpenClaw: npm 全局目录" >> "$shell_rc"
+            echo "export PATH=\"$path_entry:\$PATH\"" >> "$shell_rc"
+        fi
+    fi
+}
+
+ensure_npm_global_writable() {
+    if [ "$EUID" -eq 0 ]; then
+        return 0
+    fi
+
+    if ! check_command npm; then
+        return 0
+    fi
+
+    local prefix
+    prefix=$(npm config get prefix 2>/dev/null || true)
+    if [ -z "$prefix" ]; then
+        return 0
+    fi
+
+    if [ -w "$prefix" ] || [ -w "$prefix/bin" ]; then
+        return 0
+    fi
+
+    log_warn "npm 全局目录不可写: $prefix"
+    local user_prefix="$HOME/.npm-global"
+    mkdir -p "$user_prefix/bin"
+
+    if npm config set prefix "$user_prefix" 2>/dev/null; then
+        export PATH="$user_prefix/bin:$PATH"
+        add_path_to_shell "$user_prefix/bin"
+        log_info "已切换 npm 全局目录到: $user_prefix"
+    else
+        log_error "无法配置 npm 全局目录，请手动设置后重试"
+        exit 1
+    fi
+}
+
 # ================================ 系统检测 ================================
 
 detect_os() {
@@ -297,6 +366,7 @@ install_openclaw() {
     
     # 使用 npm 全局安装
     log_info "正在从 npm 安装 OpenClaw..."
+    ensure_npm_global_writable
     npm install -g openclaw@$OPENCLAW_VERSION
     
     # 验证安装
@@ -346,31 +416,31 @@ EOF
     # 根据 AI_PROVIDER 设置对应的环境变量
     case "$AI_PROVIDER" in
         anthropic)
-            echo "export ANTHROPIC_API_KEY=$AI_KEY" >> "$env_file"
-            [ -n "$BASE_URL" ] && echo "export ANTHROPIC_BASE_URL=$BASE_URL" >> "$env_file"
+            append_env_export "$env_file" "ANTHROPIC_API_KEY" "$AI_KEY"
+            [ -n "$BASE_URL" ] && append_env_export "$env_file" "ANTHROPIC_BASE_URL" "$BASE_URL"
             ;;
         openai)
-            echo "export OPENAI_API_KEY=$AI_KEY" >> "$env_file"
-            [ -n "$BASE_URL" ] && echo "export OPENAI_BASE_URL=$BASE_URL" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$AI_KEY"
+            [ -n "$BASE_URL" ] && append_env_export "$env_file" "OPENAI_BASE_URL" "$BASE_URL"
             ;;
         google)
-            echo "export GOOGLE_API_KEY=$AI_KEY" >> "$env_file"
-            [ -n "$BASE_URL" ] && echo "export GOOGLE_BASE_URL=$BASE_URL" >> "$env_file"
+            append_env_export "$env_file" "GOOGLE_API_KEY" "$AI_KEY"
+            [ -n "$BASE_URL" ] && append_env_export "$env_file" "GOOGLE_BASE_URL" "$BASE_URL"
             ;;
         groq)
-            echo "export OPENAI_API_KEY=$AI_KEY" >> "$env_file"
-            echo "export OPENAI_BASE_URL=${BASE_URL:-https://api.groq.com/openai/v1}" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$AI_KEY"
+            append_env_export "$env_file" "OPENAI_BASE_URL" "${BASE_URL:-https://api.groq.com/openai/v1}"
             ;;
         mistral)
-            echo "export OPENAI_API_KEY=$AI_KEY" >> "$env_file"
-            echo "export OPENAI_BASE_URL=${BASE_URL:-https://api.mistral.ai/v1}" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$AI_KEY"
+            append_env_export "$env_file" "OPENAI_BASE_URL" "${BASE_URL:-https://api.mistral.ai/v1}"
             ;;
         openrouter)
-            echo "export OPENAI_API_KEY=$AI_KEY" >> "$env_file"
-            echo "export OPENAI_BASE_URL=${BASE_URL:-https://openrouter.ai/api/v1}" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$AI_KEY"
+            append_env_export "$env_file" "OPENAI_BASE_URL" "${BASE_URL:-https://openrouter.ai/api/v1}"
             ;;
         ollama)
-            echo "export OLLAMA_HOST=${BASE_URL:-http://localhost:11434}" >> "$env_file"
+            append_env_export "$env_file" "OLLAMA_HOST" "${BASE_URL:-http://localhost:11434}"
             ;;
     esac
     
@@ -529,7 +599,9 @@ try {
         log_info "使用 node 配置自定义 Provider..."
         
         # 将变量写入临时文件，避免 shell 转义问题
-        local tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        local tmp_vars
+        tmp_vars=$(mktemp "${TMPDIR:-/tmp}/openclaw_provider_vars.XXXXXX") || tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        chmod 600 "$tmp_vars" 2>/dev/null || true
         cat > "$tmp_vars" << EOFVARS
 {
     "config_file": "$config_file",
@@ -609,7 +681,9 @@ console.log('Custom provider configured: ' + vars.provider_id);
         log_info "使用 python3 配置自定义 Provider..."
         
         # 将变量写入临时文件，避免 shell 转义问题
-        local tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        local tmp_vars
+        tmp_vars=$(mktemp "${TMPDIR:-/tmp}/openclaw_provider_vars.XXXXXX") || tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        chmod 600 "$tmp_vars" 2>/dev/null || true
         cat > "$tmp_vars" << EOFVARS
 {
     "config_file": "$config_file",
@@ -1059,18 +1133,19 @@ test_api_connection() {
         local exit_code
         
         # 使用 timeout 命令（如果可用），否则直接运行
-        # 注意：添加 || true 防止 set -e 导致脚本退出
         if command -v timeout &> /dev/null; then
-            result=$(timeout 30 openclaw agent --local --to "+1234567890" --message "回复 OK" 2>&1) || true
-            exit_code=${PIPESTATUS[0]}
-            # 如果 exit_code 为空，从 $? 获取（兼容不同 shell）
-            [ -z "$exit_code" ] && exit_code=$?
-            if [ "$exit_code" = "124" ]; then
+            set +e
+            result=$(timeout 30 openclaw agent --local --to "+1234567890" --message "回复 OK" 2>&1)
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -eq 124 ]; then
                 result="测试超时（30秒）"
             fi
         else
-            result=$(openclaw agent --local --to "+1234567890" --message "回复 OK" 2>&1) || true
+            set +e
+            result=$(openclaw agent --local --to "+1234567890" --message "回复 OK" 2>&1)
             exit_code=$?
+            set -e
         fi
         
         # 过滤掉 Node.js 警告信息
@@ -1263,7 +1338,7 @@ After=network.target
 [Service]
 Type=simple
 User=$USER
-ExecStart=$(which openclaw) start --daemon
+ExecStart=$(which openclaw) gateway --port 18789
 Restart=on-failure
 RestartSec=10
 

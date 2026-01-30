@@ -124,6 +124,75 @@ confirm() {
     esac
 }
 
+# 安全写入环境变量（处理特殊字符）
+escape_env_value() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '%s' "$value"
+}
+
+append_env_export() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    printf 'export %s="%s"\n' "$key" "$(escape_env_value "$value")" >> "$file"
+}
+
+add_path_to_shell() {
+    local path_entry="$1"
+    local shell_rc=""
+
+    if [ -f "$HOME/.zshrc" ]; then
+        shell_rc="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        shell_rc="$HOME/.bashrc"
+    elif [ -f "$HOME/.bash_profile" ]; then
+        shell_rc="$HOME/.bash_profile"
+    fi
+
+    if [ -n "$shell_rc" ]; then
+        if ! grep -q "$path_entry" "$shell_rc" 2>/dev/null; then
+            echo "" >> "$shell_rc"
+            echo "# OpenClaw: npm 全局目录" >> "$shell_rc"
+            echo "export PATH=\"$path_entry:\$PATH\"" >> "$shell_rc"
+        fi
+    fi
+}
+
+ensure_npm_global_writable() {
+    if [ "$EUID" -eq 0 ]; then
+        return 0
+    fi
+
+    if ! command -v npm &> /dev/null; then
+        return 0
+    fi
+
+    local prefix
+    prefix=$(npm config get prefix 2>/dev/null || true)
+    if [ -z "$prefix" ]; then
+        return 0
+    fi
+
+    if [ -w "$prefix" ] || [ -w "$prefix/bin" ]; then
+        return 0
+    fi
+
+    log_warn "npm 全局目录不可写: $prefix"
+    local user_prefix="$HOME/.npm-global"
+    mkdir -p "$user_prefix/bin"
+
+    if npm config set prefix "$user_prefix" 2>/dev/null; then
+        export PATH="$user_prefix/bin:$PATH"
+        add_path_to_shell "$user_prefix/bin"
+        log_info "已切换 npm 全局目录到: $user_prefix"
+    else
+        log_error "无法配置 npm 全局目录，请手动设置"
+        return 1
+    fi
+}
+
 # 检查依赖
 check_dependencies() {
     if ! command -v yq &> /dev/null; then
@@ -247,8 +316,7 @@ test_ai_connection() {
     echo ""
     
     local result
-    # 添加 || true 防止命令失败导致函数退出
-    result=$(openclaw agent --local --to "+1234567890" --message "回复 OK" 2>&1) || true
+    result=$(openclaw agent --local --to "+1234567890" --message "回复 OK" 2>&1)
     local exit_code=$?
     
     # 过滤掉 Node.js 警告信息和 JavaScript 错误
@@ -3373,43 +3441,43 @@ EOF
     # 根据 provider 设置对应的环境变量
     case "$provider" in
         anthropic)
-            echo "export ANTHROPIC_API_KEY=$api_key" >> "$env_file"
-            [ -n "$base_url" ] && echo "export ANTHROPIC_BASE_URL=$base_url" >> "$env_file"
+            append_env_export "$env_file" "ANTHROPIC_API_KEY" "$api_key"
+            [ -n "$base_url" ] && append_env_export "$env_file" "ANTHROPIC_BASE_URL" "$base_url"
             ;;
         openai)
-            echo "export OPENAI_API_KEY=$api_key" >> "$env_file"
-            [ -n "$base_url" ] && echo "export OPENAI_BASE_URL=$base_url" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$api_key"
+            [ -n "$base_url" ] && append_env_export "$env_file" "OPENAI_BASE_URL" "$base_url"
             ;;
         google|google-gemini-cli|google-antigravity)
-            echo "export GOOGLE_API_KEY=$api_key" >> "$env_file"
-            [ -n "$base_url" ] && echo "export GOOGLE_BASE_URL=$base_url" >> "$env_file"
+            append_env_export "$env_file" "GOOGLE_API_KEY" "$api_key"
+            [ -n "$base_url" ] && append_env_export "$env_file" "GOOGLE_BASE_URL" "$base_url"
             ;;
         groq)
-            echo "export OPENAI_API_KEY=$api_key" >> "$env_file"
-            echo "export OPENAI_BASE_URL=${base_url:-https://api.groq.com/openai/v1}" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$api_key"
+            append_env_export "$env_file" "OPENAI_BASE_URL" "${base_url:-https://api.groq.com/openai/v1}"
             ;;
         mistral)
-            echo "export OPENAI_API_KEY=$api_key" >> "$env_file"
-            echo "export OPENAI_BASE_URL=${base_url:-https://api.mistral.ai/v1}" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$api_key"
+            append_env_export "$env_file" "OPENAI_BASE_URL" "${base_url:-https://api.mistral.ai/v1}"
             ;;
         openrouter)
-            echo "export OPENAI_API_KEY=$api_key" >> "$env_file"
-            echo "export OPENAI_BASE_URL=${base_url:-https://openrouter.ai/api/v1}" >> "$env_file"
+            append_env_export "$env_file" "OPENAI_API_KEY" "$api_key"
+            append_env_export "$env_file" "OPENAI_BASE_URL" "${base_url:-https://openrouter.ai/api/v1}"
             ;;
         ollama)
-            echo "export OLLAMA_HOST=${base_url:-http://localhost:11434}" >> "$env_file"
+            append_env_export "$env_file" "OLLAMA_HOST" "${base_url:-http://localhost:11434}"
             ;;
         xai)
-            echo "export XAI_API_KEY=$api_key" >> "$env_file"
+            append_env_export "$env_file" "XAI_API_KEY" "$api_key"
             ;;
         zai)
-            echo "export ZAI_API_KEY=$api_key" >> "$env_file"
+            append_env_export "$env_file" "ZAI_API_KEY" "$api_key"
             ;;
         minimax|minimax-cn)
-            echo "export MINIMAX_API_KEY=$api_key" >> "$env_file"
+            append_env_export "$env_file" "MINIMAX_API_KEY" "$api_key"
             ;;
         opencode)
-            echo "export OPENCODE_API_KEY=$api_key" >> "$env_file"
+            append_env_export "$env_file" "OPENCODE_API_KEY" "$api_key"
             ;;
     esac
     
@@ -3583,7 +3651,9 @@ try {
         log_info "使用 node 配置自定义 Provider..."
         
         # 将变量写入临时文件，避免 shell 转义问题
-        local tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        local tmp_vars
+        tmp_vars=$(mktemp "${TMPDIR:-/tmp}/openclaw_provider_vars.XXXXXX") || tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        chmod 600 "$tmp_vars" 2>/dev/null || true
         cat > "$tmp_vars" << EOFVARS
 {
     "config_file": "$config_file",
@@ -3663,7 +3733,9 @@ console.log('Custom provider configured: ' + vars.provider_id);
         log_info "使用 python3 配置自定义 Provider..."
         
         # 将变量写入临时文件，避免 shell 转义问题
-        local tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        local tmp_vars
+        tmp_vars=$(mktemp "${TMPDIR:-/tmp}/openclaw_provider_vars.XXXXXX") || tmp_vars="/tmp/openclaw_provider_vars_$$.json"
+        chmod 600 "$tmp_vars" 2>/dev/null || true
         cat > "$tmp_vars" << EOFVARS
 {
     "config_file": "$config_file",
@@ -3828,12 +3900,23 @@ advanced_settings() {
         6)
             echo ""
             log_info "正在更新 OpenClaw..."
-            npm update -g openclaw
-            log_info "更新完成"
+            if ensure_npm_global_writable; then
+                npm update -g openclaw
+                log_info "更新完成"
+            else
+                log_error "更新失败：npm 全局目录不可写"
+            fi
             ;;
         7)
             if confirm "确定要卸载 OpenClaw 吗？" "n"; then
-                npm uninstall -g openclaw
+                if ensure_npm_global_writable; then
+                    npm uninstall -g openclaw
+                else
+                    log_error "卸载失败：npm 全局目录不可写"
+                    press_enter
+                    advanced_settings
+                    return
+                fi
                 if confirm "是否同时删除配置文件？" "n"; then
                     rm -rf "$CONFIG_DIR"
                 fi
